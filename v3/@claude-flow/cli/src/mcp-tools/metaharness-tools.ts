@@ -57,12 +57,47 @@ function locatePluginScripts(): string | null {
   return null;
 }
 
-function runScript(scriptName: string, args: string[]): Promise<{ exitCode: number; stdout: string; json: unknown; degraded: boolean }> {
+/**
+ * Result of running a metaharness plugin script.
+ *
+ * SUCCESS SEMANTICS (iter 44 — fix for iter-43-flagged bug)
+ * `success` is computed from the canonical signal: exitCode === 0.
+ *
+ * Three observable cases:
+ *   1. exitCode 0 + valid JSON          → success: true, degraded: false
+ *      (happy path; data is the script's JSON output)
+ *
+ *   2. exitCode 0 + degraded payload    → success: true, degraded: true
+ *      (ADR-150 constraint #3 — upstream `@metaharness/*` absent, script
+ *      emits `{degraded:true, reason:"metaharness-not-available"}` and
+ *      exits 0 so ruflo stays operational. `success: true` because the
+ *      script DID run as designed; the agent reads `degraded: true` to
+ *      know the dep was missing.)
+ *
+ *   3. exitCode != 0                    → success: false
+ *      Two sub-cases:
+ *        a. exitCode 1 with alert.triggered JSON  → intentional alert
+ *           failure (e.g. --alert-on-fit-below 70). Agents read
+ *           `data.alert.triggered` for the reason.
+ *        b. exitCode 2 with stderr-only           → user error (bad arg).
+ *           `data` is null because no JSON was on stdout.
+ *
+ * BEFORE iter 44 `success` was computed as `!degraded`, which collapsed
+ * case 3b into success: true / exitCode: 2 — contradictory.
+ */
+function runScript(scriptName: string, args: string[]): Promise<{
+  exitCode: number;
+  stdout: string;
+  json: unknown;
+  degraded: boolean;
+  success: boolean;
+}> {
   return new Promise((resolve) => {
     const dir = locatePluginScripts();
     if (!dir) {
       resolve({
-        exitCode: 0, stdout: '', json: { degraded: true, reason: 'plugin-not-found' }, degraded: true,
+        exitCode: 0, stdout: '', json: { degraded: true, reason: 'plugin-not-found' },
+        degraded: true, success: true,  // plugin absent → equivalent to case 2
       });
       return;
     }
@@ -83,11 +118,20 @@ function runScript(scriptName: string, args: string[]): Promise<{ exitCode: numb
       const m = /\{[\s\S]*\}/.exec(stdout);
       if (m) { try { json = JSON.parse(m[0]); } catch { /* leave null */ } }
       const looksDegraded = !!(json && typeof json === 'object' && (json as { degraded?: unknown }).degraded === true);
-      resolve({ exitCode: code ?? 0, stdout, json, degraded: looksDegraded });
+      const exitCode = code ?? 0;
+      // iter 44 — success now reflects exit code, not the degraded marker.
+      // exit 0 = script ran as designed (whether the result was happy
+      // data or a graceful-degradation payload). exit != 0 = something
+      // went wrong (intentional alert OR user/system error).
+      const success = exitCode === 0;
+      resolve({ exitCode, stdout, json, degraded: looksDegraded, success });
     });
     p.on('error', () => {
       clearTimeout(timer);
-      resolve({ exitCode: 127, stdout, json: { degraded: true, reason: 'spawn-failed' }, degraded: true });
+      resolve({
+        exitCode: 127, stdout, json: { degraded: true, reason: 'spawn-failed' },
+        degraded: true, success: false,
+      });
     });
   });
 }
@@ -109,7 +153,7 @@ export const metaharnessTools: MCPTool[] = [
       const args = ['--path', path];
       if (input.alertOnFitBelow !== undefined) args.push('--alert-on-fit-below', String(input.alertOnFitBelow));
       const r = await runScript('score.mjs', args);
-      return { success: !r.degraded, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
+      return { success: r.success, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
     },
   },
   {
@@ -128,7 +172,7 @@ export const metaharnessTools: MCPTool[] = [
       const args = ['--path', path];
       if (input.alertOnRiskAbove !== undefined) args.push('--alert-on-risk-above', String(input.alertOnRiskAbove));
       const r = await runScript('genome.mjs', args);
-      return { success: !r.degraded, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
+      return { success: r.success, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
     },
   },
   {
@@ -146,7 +190,7 @@ export const metaharnessTools: MCPTool[] = [
       const path = (input.path as string) || '.';
       const failOn = (input.failOn as string) || 'high';
       const r = await runScript('mcp-scan.mjs', ['--path', path, '--fail-on', failOn]);
-      return { success: !r.degraded, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
+      return { success: r.success, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
     },
   },
   {
@@ -164,7 +208,7 @@ export const metaharnessTools: MCPTool[] = [
       const path = (input.path as string) || '.';
       const failOn = (input.failOn as string) || 'high';
       const r = await runScript('threat-model.mjs', ['--path', path, '--fail-on', failOn]);
-      return { success: !r.degraded, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
+      return { success: r.success, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
     },
   },
   {
@@ -185,7 +229,7 @@ export const metaharnessTools: MCPTool[] = [
       if (input.dryRun === true) args.push('--dry-run');
       if (input.alertOnWorst !== undefined) args.push('--alert-on-worst', String(input.alertOnWorst));
       const r = await runScript('oia-audit.mjs', args);
-      return { success: !r.degraded, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
+      return { success: r.success, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
     },
   },
   {
@@ -204,7 +248,7 @@ export const metaharnessTools: MCPTool[] = [
       if (input.limit !== undefined) args.push('--limit', String(input.limit));
       if (input.since !== undefined) args.push('--since', String(input.since));
       const r = await runScript('audit-list.mjs', args);
-      return { success: !r.degraded, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
+      return { success: r.success, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
     },
   },
   {
@@ -231,7 +275,7 @@ export const metaharnessTools: MCPTool[] = [
       if (input.perDimension === true) args.push('--per-dimension');
       if (input.alertBelow !== undefined) args.push('--alert-below', String(input.alertBelow));
       const r = await runScript('similarity.mjs', args);
-      return { success: !r.degraded, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
+      return { success: r.success, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
     },
   },
   {
@@ -253,7 +297,7 @@ export const metaharnessTools: MCPTool[] = [
       const args = ['--baseline-key', baselineKey, '--current-key', currentKey];
       if (input.alertOnWorsening === true) args.push('--alert-on-worsening');
       const r = await runScript('audit-trend.mjs', args);
-      return { success: !r.degraded, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
+      return { success: r.success, data: r.json, degraded: r.degraded, exitCode: r.exitCode };
     },
   },
 ];

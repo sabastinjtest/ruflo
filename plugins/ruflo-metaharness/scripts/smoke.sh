@@ -191,6 +191,22 @@ grep -q "execCli(\[\s*'-y'\s*,\s*'metaharness@latest'" "$F" 2>/dev/null || \
 grep -q "cwd: opts" "$F" || miss="$miss no-cwd-passthrough"
 [[ -z "$miss" ]] && ok || bad "$miss"
 
+step "17z7. MCP wrapper success semantic fix (iter 44 — exitCode is the source of truth)"
+miss=""
+WRAPPER="$ROOT/../../v3/@claude-flow/cli/src/mcp-tools/metaharness-tools.ts"
+# runScript signature includes success now
+grep -q "success: boolean" "$WRAPPER" 2>/dev/null || miss="$miss no-success-type"
+grep -q "success = exitCode === 0" "$WRAPPER" 2>/dev/null || miss="$miss no-exitcode-derived-success"
+# All 8 handlers use r.success, NOT !r.degraded
+COUNT_OLD=$(grep -c "success: !r.degraded" "$WRAPPER" 2>/dev/null; true)
+[[ "$COUNT_OLD" == "0" ]] || miss="$miss old-pattern-still-present:$COUNT_OLD"
+COUNT_NEW=$(grep -c "success: r.success" "$WRAPPER" 2>/dev/null; true)
+[[ "$COUNT_NEW" == "8" ]] || miss="$miss new-pattern-count:$COUNT_NEW-expected-8"
+# Runtime anchors: iter 44 success assertions present
+T="$ROOT/scripts/test-mcp-tools.mjs"
+grep -q "iter 44 fix" "$T" 2>/dev/null || miss="$miss no-iter44-anchors"
+[[ -z "$miss" ]] && ok || bad "$miss"
+
 step "17z6. test-mcp-tools.mjs Phase 4 positive-case (iter 43 — output-shape gate)"
 F="$ROOT/scripts/test-mcp-tools.mjs"
 miss=""

@@ -220,6 +220,10 @@ async function main() {
     assert(rAlert.data?.alert?.triggered === true,
       'similarity alertBelow=0.99 triggers alert');
     assert(rAlert.exitCode === 1, 'similarity alertBelow=0.99 → exitCode 1');
+    // iter 44 — success semantic anchor (was true under the pre-iter-44
+    // `!degraded` rule; now false because exitCode !== 0 dominates).
+    assert(rAlert.success === false,
+      'similarity alertBelow=0.99 → success === false (iter 44 fix)');
   }
 
   // metaharness_audit_trend — positive case via file inputs
@@ -257,6 +261,11 @@ async function main() {
       'audit_trend bad-keys path exits 2 (script-level guard fires)');
     assert(r.data === null || r.data === undefined,
       'audit_trend bad-keys path: data null (no JSON emitted on stderr exit)');
+    // iter 44 — success semantic anchor. Pre-iter-44 wrapper returned
+    // success:true for this case (because no degraded marker). Now
+    // returns false because exitCode !== 0.
+    assert(r.success === false,
+      'audit_trend bad-keys path: success === false (iter 44 fix)');
   }
 
   // Cleanup
